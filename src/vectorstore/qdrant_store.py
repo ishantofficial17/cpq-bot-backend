@@ -112,7 +112,7 @@ class QdrantStore:
             embedding=self.embeddings,
         )
 
-        self._ensure_payload_index()
+        self._ensure_payload_indexes()
 
         log.info(
             "Loaded Qdrant collection '%s' (%d vectors)",
@@ -210,54 +210,43 @@ class QdrantStore:
             log.info("Dropping collection '%s'...", self.collection_name)
             self.client.delete_collection(self.collection_name)
 
-    def _ensure_payload_index(self):
-        """Create a text payload index on source_doc for MatchText filtering."""
-        try:
-            self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name="metadata.source_doc",
-                field_schema=models.TextIndexParams(
-                    type=models.TextIndexType.TEXT,
-                    tokenizer=models.TokenizerType.WORD,
-                    min_token_len=2,
-                    max_token_len=20,
-                ),
-            )
-            log.info("Text index on 'metadata.source_doc' ensured.")
-        except Exception:
-            pass  # index already exists
+    def _ensure_payload_indexes(self):
+        """Create KEYWORD indexes on metadata fields for fast exact-match filtering."""
+        for field in ("metadata.doc_category", "metadata.source_doc"):
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field,
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                pass  # index already exists
+        log.info("Payload indexes ensured on doc_category and source_doc.")
 
-    # ── Native Qdrant filter ─────────────────────────────────────────────────
+    # ── Native Qdrant filters ────────────────────────────────────────────────
 
     @staticmethod
-    def _pdf_filter() -> models.Filter:
-        """
-        Qdrant-native filter: only match documents that have a source_doc field.
-        Applied DURING vector search — not after — so we always get exactly k results.
-        """
+    def category_filter(category: str) -> models.Filter:
+        """Filter by document category (e.g. 'BML', 'Best Practices')."""
         return models.Filter(
             must=[
                 models.FieldCondition(
-                    key="metadata.source_doc",
-                    match=models.MatchText(text=".pdf"),
+                    key="metadata.doc_category",
+                    match=models.MatchValue(value=category),
                 )
             ]
         )
 
     # ── Retrievers ────────────────────────────────────────────────────────────
 
-    def _get_all_pdf_documents(self) -> list[Document]:
-        """
-        Scroll through all documents in the collection that come from PDFs.
-        Uses native Qdrant filtering. Needed to build the BM25 sparse index.
-        """
+    def _get_all_documents(self) -> list[Document]:
+        """Scroll through ALL documents in the collection for BM25 index."""
         all_docs = []
         offset = None
 
         while True:
             points, next_offset = self.client.scroll(
                 collection_name=self.collection_name,
-                scroll_filter=self._pdf_filter(),
                 limit=256,
                 offset=offset,
                 with_payload=True,
@@ -279,42 +268,32 @@ class QdrantStore:
         return all_docs
 
     def get_retriever(self, k=10):
-        """Dense-only Qdrant retriever with native PDF filter."""
-        return self.vectorstore.as_retriever(
-            search_kwargs={"k": k, "filter": self._pdf_filter()}
-        )
+        """Dense-only Qdrant retriever (no filter — all docs are CPQ)."""
+        return self.vectorstore.as_retriever(search_kwargs={"k": k})
 
     def get_hybrid_retriever(self, k=10, dense_weight=0.6, sparse_weight=0.4):
         """
-        Hybrid retriever: Qdrant (dense) + BM25 (sparse).
-
-        - Dense: uses native Qdrant filter (only PDF sources, applied during search)
-        - Sparse: BM25 built from PDF-only docs (filtered via Qdrant scroll)
-        - Results merged via weighted Reciprocal Rank Fusion.
+        Hybrid retriever: Qdrant (dense semantic) + BM25 (sparse keyword).
+        Results merged via weighted Reciprocal Rank Fusion.
         """
-        # Dense retriever (Qdrant) — native filter guarantees all k results are PDFs
-        dense_retriever = self.vectorstore.as_retriever(
-            search_kwargs={"k": k, "filter": self._pdf_filter()}
-        )
+        dense_retriever = self.vectorstore.as_retriever(search_kwargs={"k": k})
 
-        # Sparse retriever (BM25) — built from PDF-only docs via native scroll filter
-        pdf_docs = self._get_all_pdf_documents()
+        all_docs = self._get_all_documents()
 
-        if not pdf_docs:
-            log.warning("No PDF documents found in Qdrant — BM25 index will be empty.")
+        if not all_docs:
+            log.warning("No documents found in Qdrant — BM25 index will be empty.")
             return dense_retriever
 
-        sparse_retriever = BM25Retriever.from_documents(pdf_docs)
+        sparse_retriever = BM25Retriever.from_documents(all_docs)
         sparse_retriever.k = k
 
-        # Ensemble (Hybrid)
         hybrid_retriever = EnsembleRetriever(
             retrievers=[dense_retriever, sparse_retriever],
             weights=[dense_weight, sparse_weight],
         )
 
         log.info(
-            "Hybrid retriever ready: %d PDF docs, k=%d, dense=%.1f/sparse=%.1f",
-            len(pdf_docs), k, dense_weight, sparse_weight,
+            "Hybrid retriever ready: %d docs, k=%d, dense=%.1f/sparse=%.1f",
+            len(all_docs), k, dense_weight, sparse_weight,
         )
         return hybrid_retriever

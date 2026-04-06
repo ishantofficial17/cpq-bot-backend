@@ -60,6 +60,16 @@ class ThresholdSematicChunker:
             )
             source_doc = os.path.basename(raw_source)
 
+            # Extract category from folder path (e.g. "BML", "Best Practices")
+            norm_path = raw_source.replace("\\", "/")
+            parts = norm_path.split("/")
+            doc_category = "General"
+            for i, part in enumerate(parts):
+                if part in ("pdf", "data"):
+                    if i + 1 < len(parts) and parts[i + 1] != source_doc:
+                        doc_category = parts[i + 1]
+                    break
+
             # Split page text into section blocks
             sections = parse_sections(doc.page_content)
 
@@ -73,8 +83,9 @@ class ThresholdSematicChunker:
 
                     chunk_metadata = {
                         **doc.metadata,
-                        "section":    section_heading,
-                        "source_doc": source_doc,
+                        "section":      section_heading,
+                        "source_doc":   source_doc,
+                        "doc_category": doc_category,
                     }
 
                     result.append(
