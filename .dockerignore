@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.git/
+qdrant_data/
+metadata/
+data/
+migrate_to_cloud.py
+requirements-ingest.txt
+ingest.py

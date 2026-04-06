@@ -1,0 +1,6 @@
+# Extra dependencies needed ONLY for local PDF ingestion (not deployed)
+# Install with: pip install -r requirements.txt -r requirements-ingest.txt
+
+llama-parse
+llama-index-core
+llama-index-readers-file
