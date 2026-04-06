@@ -18,6 +18,8 @@ Start the server
 import sys
 import time
 import logging
+import asyncio
+import threading
 
 from contextlib import asynccontextmanager
 
@@ -85,52 +87,59 @@ _vector_db: QdrantStore | None = None
 
 # ── Startup / shutdown ─────────────────────────────────────────────────────────
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def _init_pipeline():
+    """Load models and build the RAG pipeline (runs in background thread)."""
     global _conversational_chain, _memory_manager, _vector_db
 
     log.info("=" * 60)
-    log.info("CPQ RAG Server — Starting up")
+    log.info("CPQ RAG Server — Loading pipeline...")
     log.info("=" * 60)
-
-    # ── Embeddings ─────────────────────────────────────────────────────────────
-    log.info("Loading embedding model...")
-    embeddings = load_embeddings()
-
-    # ── Vector store ───────────────────────────────────────────────────────────
-    _vector_db = QdrantStore(embeddings)
 
     try:
+        # ── Embeddings ─────────────────────────────────────────────────────────
+        log.info("Loading embedding model...")
+        embeddings = load_embeddings()
+
+        # ── Vector store ───────────────────────────────────────────────────────
+        _vector_db = QdrantStore(embeddings)
+
         log.info("Loading Qdrant vector store...")
         _vector_db.load_store()
-    except FileNotFoundError as exc:
-        log.error("%s", exc)
-        sys.exit(1)
 
-    retriever = _vector_db.get_hybrid_retriever(
-        k=RETRIEVER_K, dense_weight=DENSE_WEIGHT, sparse_weight=SPARSE_WEIGHT,
-    )
+        retriever = _vector_db.get_hybrid_retriever(
+            k=RETRIEVER_K, dense_weight=DENSE_WEIGHT, sparse_weight=SPARSE_WEIGHT,
+        )
 
-    # ── LLM ────────────────────────────────────────────────────────────────────
-    log.info("Loading LLM  (%s)...", LLM_MODEL)
-    llm = init_chat_model(LLM_MODEL)
+        # ── LLM ────────────────────────────────────────────────────────────────
+        log.info("Loading LLM  (%s)...", LLM_MODEL)
+        llm = init_chat_model(LLM_MODEL)
 
-    # ── Reranker ───────────────────────────────────────────────────────────────
-    log.info("Initialising reranker...")
-    reranker = LLMReranker(llm)
+        # ── Reranker ───────────────────────────────────────────────────────────
+        log.info("Initialising reranker...")
+        reranker = LLMReranker(llm)
 
-    # ── RAG chain ──────────────────────────────────────────────────────────────
-    log.info("Building conversational RAG chain...")
-    rag_builder = ConversationalRAG(retriever=retriever, reranker=reranker, llm=llm)
-    rag_chain   = rag_builder.build_chain()
+        # ── RAG chain ──────────────────────────────────────────────────────────
+        log.info("Building conversational RAG chain...")
+        rag_builder = ConversationalRAG(retriever=retriever, reranker=reranker, llm=llm)
+        rag_chain   = rag_builder.build_chain()
 
-    # ── Memory ─────────────────────────────────────────────────────────────────
-    _memory_manager       = ChatMemoryManager()
-    _conversational_chain = _memory_manager.wrap_chain(rag_chain)
+        # ── Memory ─────────────────────────────────────────────────────────────
+        _memory_manager       = ChatMemoryManager()
+        _conversational_chain = _memory_manager.wrap_chain(rag_chain)
 
-    log.info("=" * 60)
-    log.info("Server ready — CPQ RAG is live")
-    log.info("=" * 60)
+        log.info("=" * 60)
+        log.info("Server ready — CPQ RAG is live")
+        log.info("=" * 60)
+
+    except Exception as exc:
+        log.exception("Pipeline init FAILED: %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start pipeline loading in background so /health is available immediately
+    thread = threading.Thread(target=_init_pipeline, daemon=True)
+    thread.start()
 
     yield
 
