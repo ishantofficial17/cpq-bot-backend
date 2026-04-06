@@ -211,14 +211,19 @@ class QdrantStore:
             self.client.delete_collection(self.collection_name)
 
     def _ensure_payload_index(self):
-        """Create a payload index on source_doc for fast metadata filtering."""
+        """Create a text payload index on source_doc for MatchText filtering."""
         try:
             self.client.create_payload_index(
                 collection_name=self.collection_name,
                 field_name="metadata.source_doc",
-                field_schema=models.PayloadSchemaType.KEYWORD,
+                field_schema=models.TextIndexParams(
+                    type=models.TextIndexType.TEXT,
+                    tokenizer=models.TokenizerType.WORD,
+                    min_token_len=2,
+                    max_token_len=20,
+                ),
             )
-            log.info("Payload index on 'metadata.source_doc' ensured.")
+            log.info("Text index on 'metadata.source_doc' ensured.")
         except Exception:
             pass  # index already exists
 
